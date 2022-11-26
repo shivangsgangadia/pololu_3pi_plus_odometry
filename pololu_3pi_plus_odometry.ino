@@ -10,10 +10,11 @@
 #include "states.h"
 #include "imu_utils.h"
 #include "log_and_write.h"
+#include <Pushbutton.h>
 #include <math.h>
 
 // #define USE_IMU
-#define DEBUG
+// #define DEBUG
 #define PRE_TASK_DELAY 2000
 
 Motor leftMotor(LMOTOR_DIR_PIN, LMOTOR_SPEED_PIN);
@@ -25,6 +26,7 @@ struct {
   LIS3MDL mag;
   LineSensor linesensor;
 } DEVICES;
+Pushbutton button(BUTTON_A);
 
 struct {
   uint8_t taskState;
@@ -114,7 +116,6 @@ void setup() {
 }
 
 
-
 float fusion_bias = 1;
 long int gyroZ_deg_moved;
 float getDegreesMoved(int timePassed) {
@@ -123,7 +124,7 @@ float getDegreesMoved(int timePassed) {
 }
 
 
-long timePassed, turnerTimer;
+long timePassed, dataRecordTimer;
 double speedRps, leftMotorCPR, rightMotorCPR;
 float degreesMoved, distanceMoved_x;
 float deltaRpsP = 0.1, deltaRpsD = 0.8;
@@ -134,6 +135,7 @@ void loop() {
   // Update time passed
   timePassed = (millis() - ENC::ENC_DATA.lastTime);
   ENC::ENC_DATA.lastTime = millis();
+  dataRecordTimer += timePassed;
   
   // Copy the data after disabling interrupts to avoid data change during the copy operation
   noInterrupts();
@@ -224,6 +226,10 @@ void loop() {
       // if (DEVICES.linesensor.pathCount > 0) {
       //   TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
       // }
+      if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
+        dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
+        dataRecordTimer = 0;
+      }
       if (TASK_DATA.X_pos >= 250) {
         TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
       }
@@ -261,6 +267,7 @@ void loop() {
     case TASK_STATES::WRITE_TO_SERIAL: {
       // You can get to this state from STOP only using button
       // Write to serial
+      dataLogger.writeToSerial();
       // Go to suspend
       TASK_DATA.taskState = TASK_STATES::PRE_TASK_SUSPEND;
       break;
@@ -274,6 +281,16 @@ void loop() {
   leftMotor.correctSpeed(Motor::targetRps - Motor::deltaRps, timePassed);
   rightMotor.correctSpeed(Motor::targetRps + Motor::deltaRps, timePassed);
 
+  if (button.getSingleDebouncedPress()) {
+    if (TASK_DATA.taskState == TASK_STATES::STOP) {
+      TASK_DATA.taskState = TASK_STATES::WRITE_TO_SERIAL;
+    }
+    else if (TASK_DATA.taskState == TASK_STATES::PRE_TASK_SUSPEND) {
+      TASK_DATA.taskState = TASK_STATES::PRE_TASK_PAUSE;
+    }
+  }
+
+  
 
   #ifdef DEBUG
   // Serial.print("Error:");

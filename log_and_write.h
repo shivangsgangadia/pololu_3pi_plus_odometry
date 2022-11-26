@@ -2,7 +2,7 @@
 #define __LOG_WRITE_H
 
 #define WAY_POINT_COUNT 50
-#define LOG_FREQUENCY 1
+#define LOG_FREQUENCY 2
 
 /**
 This system will enable the bot to log and write coordinates when a button is pressed
@@ -46,7 +46,7 @@ class Logger {
     for (int i = 0; i < this->wayPointCount; i++) {
       Serial.print(this->wayPoints[i][0]);
       Serial.print(',');
-      Serial.print(this->wayPoints[i][1]);
+      Serial.println(this->wayPoints[i][1]);
       delay(100);
     }
     this->wayPointCount = 0;
