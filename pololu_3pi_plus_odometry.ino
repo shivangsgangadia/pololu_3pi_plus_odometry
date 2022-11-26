@@ -9,12 +9,16 @@
 #include <LIS3MDL.h>
 #include "states.h"
 #include "imu_utils.h"
+#include "log_and_write.h"
+#include <math.h>
 
 // #define USE_IMU
 #define DEBUG
+#define PRE_TASK_DELAY 2000
 
 Motor leftMotor(LMOTOR_DIR_PIN, LMOTOR_SPEED_PIN);
 Motor rightMotor(RMOTOR_DIR_PIN, RMOTOR_SPEED_PIN);
+Logger dataLogger;
 
 struct {
   LSM6 imu;
@@ -26,8 +30,10 @@ struct {
   uint8_t taskState;
   uint8_t noLineCounter = 0;
   float targetHeading = 0.0;
+  float currentHeading = 0.0;
   uint8_t previousTaskState;
-
+  float X_pos = 0.0;
+  float Y_pos = 0.0;
 } TASK_DATA;
 
 void blinkAndBeep(uint8_t count) {
@@ -39,7 +45,7 @@ void blinkAndBeep(uint8_t count) {
   }
 }
 
-
+long lineSensorTimerMicros;
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);
@@ -101,7 +107,9 @@ void setup() {
   
 
   TASK_DATA.taskState = TASK_STATES::TASK_BEGIN;
-  // TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
+  // Preserve this order because prepRead involves a 10us delay
+  DEVICES.linesensor.prepRead();
+  lineSensorTimerMicros = micros();
 
 }
 
@@ -115,10 +123,10 @@ float getDegreesMoved(int timePassed) {
 }
 
 
-int timePassed, turnerTimer;
+long timePassed, turnerTimer;
 double speedRps, leftMotorCPR, rightMotorCPR;
-float heading, degreesMoved;
-float deltaRpsP = 0.08, deltaRpsD = 1;
+float degreesMoved, distanceMoved_x;
+float deltaRpsP = 0.1, deltaRpsD = 0.8;
 float headingError, previousHeadingError;
 uint8_t fullReadings, calibratedReadings;
 void loop() {
@@ -137,18 +145,18 @@ void loop() {
   float leftMotorRotations = leftMotorCPR / ENC_COUNTS_PER_ROTATION;
   float rightMotorRotations = rightMotorCPR / ENC_COUNTS_PER_ROTATION;
 
-  // Read line sensor
-  // leftMotor.stop();
-  // rightMotor.stop();
-  // Motor::targetRps = 0;
-  DEVICES.linesensor.read();
+  // Read and update line sensor
+  DEVICES.linesensor.blockingRead();
+  fullReadings = DEVICES.linesensor.getCalibratedReadings();
+  DEVICES.linesensor.findPaths();
 
-  //------------------------------UPDATE TASK STATE-------------------------------
+  //------------------------------UPDATE ROBOT & SENSOR STATE-------------------------------
 
-  // Calculate rotations per second
+  // Calculate rotations per second for both motors
   leftMotor.currentRps = leftMotorRotations / (timePassed / 1000);
   rightMotor.currentRps = rightMotorRotations / (timePassed / 1000);
 
+  // If movement of wheels is too small or time period is too small, currentRps often becomes 0 or indeterminate, respectively
   if (isnan(leftMotor.currentRps) || isinf(leftMotor.currentRps)) {
     leftMotor.currentRps = 0;
   }
@@ -162,26 +170,40 @@ void loop() {
   if (leftMotor.currentDirection == REVERSE_DIRECTION) leftMotorRotations = - leftMotorRotations;
   if (rightMotor.currentDirection == REVERSE_DIRECTION) rightMotorRotations = - rightMotorRotations;
 
-  float leftMotorDistanceMoved = (leftMotorRotations * WHEEL_CIRCUMFERENCE) / 2;
-  float rightMotorDistanceMoved = (rightMotorRotations * WHEEL_CIRCUMFERENCE) / 2;
-  // Serial.println(leftMotorDistanceMoved);
+  // Calculate Distance Moved
+  float leftWheelDistanceMoved = (leftMotorRotations * WHEEL_CIRCUMFERENCE);
+  float rightWheelDistanceMoved = (rightMotorRotations * WHEEL_CIRCUMFERENCE);
+  distanceMoved_x = (leftWheelDistanceMoved + rightWheelDistanceMoved) / 2; // TODO: make A - B and then check
 
   //                      Gyro reading                    Mag reading
   // degreesMoved = getDegreesMoved(timePassed);
   // heading = 0;
-  // degreesMoved = (rightMotorDistanceMoved - leftMotorDistanceMoved) * (360 / BOT_CIRCUMFERENCE);
-  // heading += degreesMoved;
+  degreesMoved = (rightWheelDistanceMoved - leftWheelDistanceMoved) * (360 / BOT_CIRCUMFERENCE);
+  TASK_DATA.currentHeading += degreesMoved;
+  TASK_DATA.X_pos += distanceMoved_x * cos(degreesMoved);
+  TASK_DATA.Y_pos += distanceMoved_x * sin(degreesMoved);
   // targetHeading -= degreesMoved;
 
   // Correct heading
-  // headingError = TASK_DATA.targetHeading - heading;
-  // Motor::deltaRps = ((headingError * deltaRpsP) + ((headingError - previousHeadingError) / timePassed) * deltaRpsD);
-  // previousHeadingError = headingError;
+  headingError = TASK_DATA.targetHeading - TASK_DATA.currentHeading;
+  Motor::deltaRps = ((headingError * deltaRpsP) + ((headingError - previousHeadingError) / timePassed) * deltaRpsD);
+  previousHeadingError = headingError;
 
+  //--------------------------UPDATE TASK STATE BASED ON SENSORS---------------------------
   TASK_DATA.previousTaskState = TASK_DATA.taskState;
-  fullReadings = DEVICES.linesensor.getCalibratedReadings();
-  calibratedReadings = (fullReadings & FRONT_SENSOR_MASK) >> 1;  // These will be mirrored. Rightmost will represent the leftmost sensor
   switch (TASK_DATA.taskState) {
+    case TASK_STATES::PRE_TASK_SUSPEND: {
+      Motor::targetRps = 0;
+      Motor::deltaRps = 0;
+      break;
+    }
+    case TASK_STATES::PRE_TASK_PAUSE: {
+      // You can come to this task from suspend only using button
+      TASK_DATA.targetHeading = 0;
+      delay(PRE_TASK_DELAY);
+      TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
+      break;
+    }
     case TASK_STATES::TASK_BEGIN: {
       TASK_DATA.targetHeading = 0;
       rightMotor.setDirection(FORWARD_DIRECTION);
@@ -199,202 +221,48 @@ void loop() {
       break;
     }
     case TASK_STATES::FIND_BLACK_LINE: {
-      // Get the readings in a easy to use format using only the front 3 sensors
-      // Determine if the front 3 line sensors are getting anything except 0. This is your black line.
-      if (calibratedReadings > 0b000 && calibratedReadings < 0b1000) {
-        // Stop the robot to get readings
-        // leftMotor.stop();
-        // rightMotor.stop();
-        // Motor::targetRps = 0;
+      // if (DEVICES.linesensor.pathCount > 0) {
+      //   TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
+      // }
+      if (TASK_DATA.X_pos >= 250) {
         TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
       }
       break;
     }
     
     case TASK_STATES::FOLLOWING_LINE: {
-      // digitalWrite(YELLOW_PIN, HIGH);
       Motor::targetRps = SLOW_RPS;
-      // Bang bang strategy
-      switch (calibratedReadings) {
-        // No line found
-        case 0b000: {
-          TASK_DATA.taskState = TASK_STATES::NO_LINE;
-          Motor::targetRps = 0;
-          Motor::deltaRps = 0;
-          break;
-        }
-        // // Turn left - extreme
-        // case 0b001: {
-        //   Motor::deltaRps = 0.4;
-        //   break;
-        // }
-        // // Turn left
-        // case 0b011: {
-        //   Motor::deltaRps = 0.2;
-        //   break;
-        // }
-        // // Turn right - extreme
-        // case 0b100: {
-        //   Motor::deltaRps = -0.4;
-        //   break;
-        // }
-        // // Turn right
-        // case 0b110: {
-        //   Motor::deltaRps = -0.2;
-        //   break;
-        // }
-        // // This could be meeting up with a line at 90. So we default to turning left behavior
-        // case 0b111: {
-          
-        //   break;
-        // }
-        default: {
-
-          Motor::deltaRps = DEVICES.linesensor.getDifferentialError() * 3;
-        }
-      }
       
-      // No line ? Go to no line
-      // digitalWrite(YELLOW_PIN, LOW);
+      TASK_DATA.taskState = TASK_STATES::NO_LINE;
+      // Line found
+      // if (DEVICES.linesensor.pathCount > 0) {
+      //   TASK_DATA.targetHeading = TASK_DATA.currentHeading - DEVICES.linesensor.pathsAngles[0];
+      // }
+      // // No line
+      // else {
+      //   TASK_DATA.taskState = TASK_STATES::NO_LINE;
+      // }
       break;
     }
-    case TASK_STATES::TURN_LEFT: {
-      turnerTimer += timePassed;
-      if (calibratedReadings != 0b000 || turnerTimer >= 2000) {
-        turnerTimer = 0;
-        Motor::targetRps = 0;
-        Motor::deltaRps = 0;
-        TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      }
-      else {
-        Motor::targetRps = 0;
-        Motor::deltaRps = 2;
-      }
-      break;
-    }
-    case TASK_STATES::TURN_RIGHT: {
-      turnerTimer += timePassed;
-      if (calibratedReadings != 0b000) {
-        turnerTimer = 0;
-        Motor::targetRps = 0;
-        Motor::deltaRps = 0;
-        TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      }
-      else {
-        Motor::targetRps = 0;
-        Motor::deltaRps = -2;
-      }
-      break;
-    }
+    
     case TASK_STATES::NO_LINE: {
-      DEVICES.linesensor.read(true);
-      fullReadings = DEVICES.linesensor.getCalibratedReadings();
-      calibratedReadings = (fullReadings & BACK_SENSOR_MASK);
-      // if (fullReadings == 0b00001){
-      if (DEVICES.linesensor.currentReadings[0] >= DEVICES.linesensor.currentReadings[SENSOR_COUNT]){
-        TASK_DATA.taskState = TASK_STATES::TURN_LEFT;
-      }
-      // else if (fullReadings & BACK_SENSOR_MASK == 0b10000){
-      else if (DEVICES.linesensor.currentReadings[0] < DEVICES.linesensor.currentReadings[SENSOR_COUNT]){
-        TASK_DATA.taskState = TASK_STATES::TURN_RIGHT;
-      }
-      // else if (fullReadings & BACK_SENSOR_MASK == 0b10001) {
-      //   TASK_DATA.taskState = TASK_STATES::TURN_LEFT;
-      // }
-      // else if (millis() < 10000) {
-      //   TASK_DATA.taskState = TASK_STATES::TURN_LEFT;
-      // }
-      else if (DEVICES.linesensor.currentReadings[0] < READ_TIME_THRESHOLD - 1000 && DEVICES.linesensor.currentReadings[SENSOR_COUNT] < READ_TIME_THRESHOLD - 1000) {
-        Motor::targetRps = SLOW_RPS;
-        Motor::deltaRps = 0;
-        TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      }
-      else {
-        Motor::targetRps = SLOW_RPS;
-        Motor::deltaRps = 0;
-        TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      }
-      // else{
-      //   // Join up
-      //   if (millis() < 20000 && millis() > 1000){
-      //     turnerTimer += timePassed;
-      //     if (turnerTimer > 500) {
-      //       TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      //       turnerTimer = 0;
-      //       Motor::targetRps = SLOW_RPS - 0.5;
-      //     }
-      //     else {
-      //       Motor::targetRps = 0;
-      //       Motor::deltaRps = -2;
-      //     }
-      //   }
-      //   // First 90
-      //   else if (millis() >= 20000 && millis() < 42000) {
-      //     turnerTimer += timePassed;
-      //     if (calibratedReadings != 0b000 || turnerTimer > 2000) {
-      //       TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      //       turnerTimer = 0;
-      //     }
-      //     else {
-      //       Motor::targetRps = 0;
-      //       Motor::deltaRps = -2;
-      //     }
-      //   }
-      //   // Gap
-      //   else if (millis() >= 42000 && millis() < 49000) {
-      //     if (calibratedReadings != 0b000) {
-      //       TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      //     }
-      //     else {
-      //       Motor::targetRps = SLOW_RPS;
-      //       Motor::deltaRps = 0;
-      //     }
-      //   }
-      //   // Second 90
-      //   else if (millis() >= 49000 && millis() < 60000){
-      //     if (calibratedReadings != 0b000) {
-      //       TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      //     }
-      //     else {
-      //       Motor::targetRps = 0;
-      //       Motor::deltaRps = 2;
-      //     }
-      //   }
-      //   else if (millis() >= 60000) {
-      //     Motor::targetRps = 0;
-      //     Motor::deltaRps = 0;
-      //     TASK_DATA.taskState = TASK_STATES::HOMECOMING;
-      //   }
-      // }
+      TASK_DATA.taskState = TASK_STATES::STOP;
+      
       break;
     }
-    case TASK_STATES::HOMECOMING: {
-      turnerTimer += timePassed;
-      if (turnerTimer >= 1400) {
-        Motor::targetRps = 0;
-        Motor::deltaRps = 0;
-        turnerTimer = 0;
-        TASK_DATA.taskState = TASK_STATES::FINISH_AND_CHILL;
-      }
-      else {
-        Motor::targetRps = 0;
-        Motor::deltaRps = 2;
-      }
+
+    case TASK_STATES::STOP: {
+      // Although this is same as PRE_TASK_SUSPEND, it needs to exist independently because the button press event needs to know where in the task's runtime we are.
+      Motor::targetRps = 0;
+      Motor::deltaRps = 0;
       break;
     }
-    case TASK_STATES::FINISH_AND_CHILL: {
-      digitalWrite(YELLOW_PIN, HIGH);
-      turnerTimer += timePassed;
-      if (turnerTimer >= 15000) {
-        Motor::targetRps = 0;
-        Motor::deltaRps = 0;
-        // turnerTimer = 0;
-        // TASK_DATA.taskState = TASK_STATES::FINISH_AND_CHILL;
-      }
-      else {
-        Motor::targetRps = 3;
-        Motor::deltaRps = 0;
-      }
+
+    case TASK_STATES::WRITE_TO_SERIAL: {
+      // You can get to this state from STOP only using button
+      // Write to serial
+      // Go to suspend
+      TASK_DATA.taskState = TASK_STATES::PRE_TASK_SUSPEND;
       break;
     }
   }
@@ -402,7 +270,7 @@ void loop() {
   
   
   //---------------------------------OUTPUT--------------------------------------
-  // Correct speed of motors
+  // Correct speed of motors every iteration
   leftMotor.correctSpeed(Motor::targetRps - Motor::deltaRps, timePassed);
   rightMotor.correctSpeed(Motor::targetRps + Motor::deltaRps, timePassed);
 
@@ -419,8 +287,8 @@ void loop() {
   // Serial.print(Motor::targetRps + Motor::deltaRps);
   // Serial.println(Motor::deltaRps);
   // Serial.print('\t');
-  Serial.print(TASK_DATA.taskState);
-  Serial.print('\t');
+  // Serial.print(TASK_DATA.taskState);
+  // Serial.print('\t');
   // Serial.print(DEVICES.linesensor.pathCount);
   // Serial.print('\t');
   // if (DEVICES.linesensor.pathCount > 0) {
@@ -429,32 +297,35 @@ void loop() {
   //     Serial.print('\t');
   //   }
   // }
-  Serial.print(leftMotor.currentSpeed);
-  Serial.print('\t');
-  Serial.print(rightMotor.currentSpeed);
-  Serial.print('\t');
+  // Serial.print(leftMotor.currentSpeed);
+  // Serial.print('\t');
+  // Serial.print(rightMotor.currentSpeed);
+  // Serial.print('\t');
 
-  // int readings = DEVICES.linesensor.getCalibratedReadings();
-  // for (int i = 1; i < SENSOR_COUNT - 1; i++) {
-  //   Serial.print((readings >> i) & 0b1);
+  // for (int i = 0; i < SENSOR_COUNT; i++) {
+  //   Serial.print((fullReadings >> i) & 0b1);
   //   Serial.print('\t');
   // }
 
-  // for (int i = 1; i < SENSOR_COUNT - 1; i++) {
+  // for (int i = 0; i < SENSOR_COUNT; i++) {
+  //   Serial.print(i);
+  //   Serial.print(":");
   //   Serial.print(DEVICES.linesensor.currentReadings[i]);
-  //   Serial.print('\t');
+  //   Serial.print(",");
   // }
+  
+  Serial.print("X:");
+  Serial.print(TASK_DATA.X_pos);
+  Serial.print(",Y:");
+  Serial.print(TASK_DATA.Y_pos);
+  Serial.print(",theta:");
+  Serial.print(TASK_DATA.currentHeading);
   Serial.println();
 #endif
   
-  
-  // delay(50);
   // int extraDelay = 100 - timePassed;
   // if (extraDelay > 0) {
   //   delay(extraDelay);
   // }
-
-  
-
 
 }

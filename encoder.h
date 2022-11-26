@@ -1,11 +1,13 @@
 #ifndef _ENCODER_H
 #define _ENCODER_H
 
+#include <math.h>
 
-#define ENC_COUNTS_PER_ROTATION 358.3 * 2
-// Pi is not included in either because it cancels out
-#define BOT_CIRCUMFERENCE (90)
-#define WHEEL_CIRCUMFERENCE (32)
+
+#define ENC_COUNTS_PER_ROTATION 358.3
+#define BOT_CIRCUMFERENCE (90 * PI)
+#define WHEEL_CIRCUMFERENCE (32 * PI)
+#define DEGREE_TO_RADIAN 0.0174533
 
 /*
 All this is in a special file because the compiler optimizes out "ISR ( PCINT0_vec )".

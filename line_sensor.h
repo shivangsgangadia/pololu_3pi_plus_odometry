@@ -8,7 +8,7 @@
 #define SENSOR_VARIANCE 10000
 #define WHITE_CALIBRATION_TIME 2000
 #define BLACK_CALIBRATION_TIME 2000
-#define READ_TIME_THRESHOLD 300000U
+#define READ_TIME_THRESHOLD 3000U
 #define FRONT_SENSOR_MASK 0b01110
 #define BACK_SENSOR_MASK 0b10001
 #define LINESENSOR_PIN (reinterpret_cast<uint8_t*>(&LINESENSOR_PINS))
@@ -31,46 +31,59 @@ class LineSensor {
   float pathsAngles[3];
   int pathCount;
   float sensorWeights[SENSOR_COUNT];
+  bool readComplete = false;
   
   struct {
     unsigned long maxWhite[SENSOR_COUNT];
   } CALIBRATION_RANGES;
 
   unsigned long currentReadings[SENSOR_COUNT];
+  unsigned long bufferReadings[SENSOR_COUNT];
 
   LineSensor() {
     for (int i = 0; i < SENSOR_COUNT; i++) {
       CALIBRATION_RANGES.maxWhite[i] = 0;
     }
-    pinMode(LINESENSOR_PINS.IR_ENABLE, OUTPUT);
-  }
-
-  void calibrateForWhite() {
-    // int initTime = millis();
-    // while (millis() - initTime <= WHITE_CALIBRATION_TIME) {
-    //   this->read(true);
-    // }
-    delay(WHITE_CALIBRATION_TIME);
-  }
-
-  /**
-  Reads the sensor values and stores them in object's public variables
-  Ideally, only 1 of the two bool switch will be active at a time
-  */
-  void read(bool getBackReadings = false) {
-    int currentPinNum = 0;
-    unsigned long initTimeBuffer, timePassed;
-
     // 1. Set the infra-red LEDs to be enabled, to transmit infra-red light to reflect off the work surface
     pinMode(LINESENSOR_PINS.IR_ENABLE, OUTPUT);
     digitalWrite(LINESENSOR_PINS.IR_ENABLE, HIGH);
+  }
+
+  void calibrateForWhite() {
+    long int initTime = millis();
+    while (millis() - initTime <= WHITE_CALIBRATION_TIME) {
+      this->prepRead();
+      long lineSensorTimerMicros = micros();
+      long microsSinceLastRead = micros() - lineSensorTimerMicros;
+      while (this->attemptRead(microsSinceLastRead) != 1) {
+        microsSinceLastRead = micros() - lineSensorTimerMicros;    
+      }
+      for (int i = 0; i < SENSOR_COUNT; i++) {
+        if (this->bufferReadings[i] > this->CALIBRATION_RANGES.maxWhite[i]) {
+          this->CALIBRATION_RANGES.maxWhite[i] = this->bufferReadings[i];
+        }
+      }
+    }
+  }
+
+  void copyReadings() {
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+      this->currentReadings[i] = this->bufferReadings[i];      
+    }
+  }
+
+  /*
+  Charge the line sensors
+  */
+  void prepRead() {
+    int currentPinNum = 0;
     
     // 2. Set the sensor measurement pin to an OUTPUT with state HIGH, to charge the capacitor
     for (int i = 0; i < SENSOR_COUNT; i++) {
       currentPinNum = LINESENSOR_PIN[i];
       pinMode(currentPinNum, OUTPUT);
       digitalWrite(currentPinNum, HIGH);
-      this->currentReadings[i] = 0;
+      this->bufferReadings[i] = 0;
     }
     
     // 3. Wait for 10microseconds for the capacitor to charge to full
@@ -82,63 +95,65 @@ class LineSensor {
       pinMode(currentPinNum, INPUT);
     }
     
-    // Disable the infra red LEDs
-    // digitalWrite(LINESENSOR_PINS.IR_ENABLE, LOW);
-    pinMode(LINESENSOR_PINS.IR_ENABLE, INPUT);
-    
-    // 5. Recording the passage of time, wait for digitalRead() on the sensor measurement pin to change to LOW whlist the capacitor discharges.
-    initTimeBuffer = micros();
-    int sensorCount;
-    if (getBackReadings) {
-      sensorCount = SENSOR_COUNT;
+    this->readComplete = false;
+  }
+
+  /*
+  Tries to read those sensors that have been discharged.
+  @return 1 if all have been read successfully
+  */
+  uint8_t attemptRead(long timePassedMicros) {
+    int currentPinNum, sensorCount = SENSOR_COUNT;
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+      currentPinNum = LINESENSOR_PIN[i];
+      
+      // 6. Once digitalRead() has change to LOW, record the elapsed time as the sensor reading.
+      if ((digitalRead(currentPinNum) == LOW) && (this->bufferReadings[i] == 0)) {
+        this->bufferReadings[i] = timePassedMicros;
+        sensorCount--;
+      }
+      else if (this->bufferReadings[i] != 0) {
+        sensorCount--;
+      }
+    }
+    if (sensorCount == 0) {
+      this->readComplete = true;
+      return 1;
+    }
+    else return 0;
+  }
+
+  /*
+  Force reads all the sensors even if they havent been discharged yet
+  */
+  uint8_t timeoutRead(long timePassedMicros) {
+    int currentPinNum, sensorCount = SENSOR_COUNT;
+    if (timePassedMicros >= READ_TIME_THRESHOLD) {
+      for (int i = 0; i < SENSOR_COUNT; i++) {
+        currentPinNum = LINESENSOR_PIN[i];
+        if (this->bufferReadings[i] == 0) {
+          this->bufferReadings[i] = timePassedMicros;
+        }
+      }
+      this->readComplete = true;
+      return 1;
     }
     else {
-      sensorCount = SENSOR_COUNT - 2;
+      return 0;
     }
-    bool timeout = false;
-    
-    while(true) {
-      timePassed = micros() - initTimeBuffer;
-      if (timePassed >= READ_TIME_THRESHOLD) timeout = true;
-      if (getBackReadings) {
-        for (int i = 0; i < SENSOR_COUNT; i++) {
-          currentPinNum = LINESENSOR_PIN[i];
-          
-          // 6. Once digitalRead() has change to LOW, record the elapsed time as the sensor reading.
-          if ((digitalRead(currentPinNum) == LOW || timeout) && this->currentReadings[i] == 0) {
-            this->currentReadings[i] = timePassed;
-            sensorCount--;
-            
-            // Add calibration values to ranges. White is here because we want to save iteration cycles as it reads all
-            // at once for all sensors
-            // if (forCalibrationWhite) {
-            //   if (timePassed > CALIBRATION_RANGES.maxWhite[i]) CALIBRATION_RANGES.maxWhite[i] = timePassed + SENSOR_VARIANCE;
-            // }
-          }
-        }
-      } else {
-        for (int i = 1; i < SENSOR_COUNT - 1; i++) {
-          currentPinNum = LINESENSOR_PIN[i];
-          
-          // 6. Once digitalRead() has change to LOW, record the elapsed time as the sensor reading.
-          if ((digitalRead(currentPinNum) == LOW || timeout) && this->currentReadings[i] == 0) {
-            this->currentReadings[i] = timePassed;
-            sensorCount--;
-            
-            // Add calibration values to ranges. White is here because we want to save iteration cycles as it reads all
-            // at once for all sensors
-            // if (forCalibrationWhite) {
-            //   if (timePassed > CALIBRATION_RANGES.maxWhite[i]) CALIBRATION_RANGES.maxWhite[i] = timePassed + SENSOR_VARIANCE;
-            // }
-          }
-        }
-      }
-      // Exit loop once all sensors have been read
-      if (sensorCount == 0) {
-        break;
-      }
-    }
+  }
 
+  /**
+  Reads line sensors and updates values in @variable this->currentReadings
+  */
+  void blockingRead () {
+    this->prepRead();
+    long lineSensorTimerMicros = micros();
+    long microsSinceLastRead = micros() - lineSensorTimerMicros;
+    while (this->attemptRead(microsSinceLastRead) != 1) {
+      microsSinceLastRead = micros() - lineSensorTimerMicros;    
+    }
+    this->copyReadings();
   }
 
   /**
@@ -148,10 +163,7 @@ class LineSensor {
     uint8_t result = 0;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
-      // if (currentReadings[i] > CALIBRATION_RANGES.maxWhite[i]) {
-      //   result |= (0b1 << i);
-      // }
-      if (currentReadings[i] > READ_TIME_THRESHOLD - 1000) {
+      if (currentReadings[i] > CALIBRATION_RANGES.maxWhite[i] + (0.2 * CALIBRATION_RANGES.maxWhite[i]) ) {
         result |= (0b1 << i);
       }
     }
@@ -160,7 +172,9 @@ class LineSensor {
   }
 
 
-  // TODO : determine number of paths and their respective angles
+  /**
+  Determine number of paths and their respective angles from the current readings. Make sure you copy values to the current readings array before calling this
+  */
   void findPaths() {
     this->pathCount = 0;
     // this->read();
@@ -204,8 +218,8 @@ class LineSensor {
         sensorWeights[i] = this->currentReadings[i] / sum;
       }
     }
-    float leftWeight = sensorWeights[1] + (0.3 * sensorWeights[2]);
-    float rightWeight = sensorWeights[3] + (0.3 * sensorWeights[2]);
+    float leftWeight = sensorWeights[1] + (0.5 * sensorWeights[2]);
+    float rightWeight = sensorWeights[3] + (0.5 * sensorWeights[2]);
     return (leftWeight - rightWeight);
   }
 
