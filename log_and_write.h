@@ -9,11 +9,10 @@ This system will enable the bot to log and write coordinates when a button is pr
 */
 
 class Logger {
-  private:
-  float wayPoints[WAY_POINT_COUNT][2];
-  int wayPointCount;
-
   public:
+  float wayPoints[WAY_POINT_COUNT][2];
+  int wayPointCount, sentWayPointCount;
+
   Logger () {
     for (int i = 0; i < WAY_POINT_COUNT; i++) {
       for (int j = 0; j < 2; j++) {
@@ -43,13 +42,15 @@ class Logger {
   Writes stored waypoints to serial and clears @variable this->wayPointCount
   */
   void writeToSerial() {
-    for (int i = 0; i < this->wayPointCount; i++) {
-      Serial.print(this->wayPoints[i][0]);
-      Serial.print(',');
-      Serial.println(this->wayPoints[i][1]);
-      delay(100);
+    if (this->sentWayPointCount < this->wayPointCount) {
+      for (int i = 0; i < this->wayPointCount; i++) {
+        Serial.print(this->wayPoints[i][0]);
+        Serial.print(',');
+        Serial.println(this->wayPoints[i][1]);
+        this->sentWayPointCount++;
+        delay(100);
+      }
     }
-    this->wayPointCount = 0;
   }
 };
 

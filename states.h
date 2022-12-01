@@ -11,6 +11,11 @@ namespace TASK_STATES {
   const uint8_t NO_LINE = 7;
   const uint8_t WRITE_TO_SERIAL = 8;
   const uint8_t STOP = 9;
+  const uint8_t TRACKING_TARGET = 10;
+  const uint8_t TARGET_REACHED = 11;
+  const uint8_t ROTATE_TO_TARGET = 12;
+  const uint8_t TRANSLATE_TO_TARGET = 13;
+  const uint8_t CHILLAXING = 14;
 }
 
 #endif

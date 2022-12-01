@@ -16,6 +16,9 @@
 // #define USE_IMU
 // #define DEBUG
 #define PRE_TASK_DELAY 2000
+#define NO_LINE_IDLE_TIME 1000
+#define HEADING_ERROR_TOLERANCE 0.01
+#define LOCATION_ERROR_TOLERANCE 0.01
 
 Motor leftMotor(LMOTOR_DIR_PIN, LMOTOR_SPEED_PIN);
 Motor rightMotor(RMOTOR_DIR_PIN, RMOTOR_SPEED_PIN);
@@ -36,6 +39,7 @@ struct {
   uint8_t previousTaskState;
   float X_pos = 0.0;
   float Y_pos = 0.0;
+  int TARGET_INDEX = 0;
 } TASK_DATA;
 
 void blinkAndBeep(uint8_t count) {
@@ -115,6 +119,10 @@ void setup() {
 
 }
 
+void setTargetHeading(float targetHeading) {
+  TASK_DATA.targetHeading = targetHeading * 2;
+}
+
 
 float fusion_bias = 1;
 long int gyroZ_deg_moved;
@@ -124,12 +132,13 @@ float getDegreesMoved(int timePassed) {
 }
 
 
-long timePassed, dataRecordTimer;
+long timePassed, dataRecordTimer, idleTime;
 double speedRps, leftMotorCPR, rightMotorCPR;
 float degreesMoved, distanceMoved_x;
-float deltaRpsP = 0.1, deltaRpsD = 0.8;
+float deltaRpsP = 0.13, deltaRpsD = 1.9;
 float headingError, previousHeadingError;
 uint8_t fullReadings, calibratedReadings;
+float x_error, y_error;
 void loop() {
   //-----------------------------COLLECT INPUTS-----------------------------------
   // Update time passed
@@ -194,18 +203,7 @@ void loop() {
   //--------------------------UPDATE TASK STATE BASED ON SENSORS---------------------------
   TASK_DATA.previousTaskState = TASK_DATA.taskState;
   switch (TASK_DATA.taskState) {
-    case TASK_STATES::PRE_TASK_SUSPEND: {
-      Motor::targetRps = 0;
-      Motor::deltaRps = 0;
-      break;
-    }
-    case TASK_STATES::PRE_TASK_PAUSE: {
-      // You can come to this task from suspend only using button
-      TASK_DATA.targetHeading = 0;
-      delay(PRE_TASK_DELAY);
-      TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      break;
-    }
+    
     case TASK_STATES::TASK_BEGIN: {
       TASK_DATA.targetHeading = 0;
       rightMotor.setDirection(FORWARD_DIRECTION);
@@ -223,16 +221,14 @@ void loop() {
       break;
     }
     case TASK_STATES::FIND_BLACK_LINE: {
-      // if (DEVICES.linesensor.pathCount > 0) {
-      //   TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
-      // }
-      if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
-        dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
-        dataRecordTimer = 0;
-      }
-      if (TASK_DATA.X_pos >= 250) {
+      Motor::targetRps = SLOW_RPS;
+      if (DEVICES.linesensor.pathCount > 0) {
         TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
       }
+      
+      // if (TASK_DATA.X_pos >= 500) {
+      //   TASK_DATA.taskState = TASK_STATES::STOP;
+      // } 
       break;
     }
     
@@ -241,19 +237,32 @@ void loop() {
       
       TASK_DATA.taskState = TASK_STATES::NO_LINE;
       // Line found
-      // if (DEVICES.linesensor.pathCount > 0) {
-      //   TASK_DATA.targetHeading = TASK_DATA.currentHeading - DEVICES.linesensor.pathsAngles[0];
-      // }
-      // // No line
-      // else {
-      //   TASK_DATA.taskState = TASK_STATES::NO_LINE;
-      // }
+      if (DEVICES.linesensor.pathCount > 0) {
+        TASK_DATA.targetHeading = TASK_DATA.currentHeading - DEVICES.linesensor.pathsAngles[0];
+        if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
+          dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
+          dataRecordTimer = 0;
+        }
+      }
+      // No line
+      else {
+        idleTime = 0;
+        TASK_DATA.taskState = TASK_STATES::NO_LINE;
+      }
       break;
     }
-    
+
     case TASK_STATES::NO_LINE: {
-      TASK_DATA.taskState = TASK_STATES::STOP;
-      
+      Motor::deltaRps = 0;
+      if (idleTime >= NO_LINE_IDLE_TIME) {
+        TASK_DATA.taskState = TASK_STATES::STOP;
+      }
+      else if(DEVICES.linesensor.pathCount > 0) {
+        TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
+      }
+      else {
+        idleTime += timePassed;
+      }
       break;
     }
 
@@ -272,6 +281,75 @@ void loop() {
       TASK_DATA.taskState = TASK_STATES::PRE_TASK_SUSPEND;
       break;
     }
+
+    case TASK_STATES::PRE_TASK_SUSPEND: {
+      Motor::targetRps = 0;
+      Motor::deltaRps = 0;
+      break;
+    }
+
+    case TASK_STATES::PRE_TASK_PAUSE: {
+      // You can come to this task from suspend only using button
+      TASK_DATA.targetHeading = 0;
+      delay(PRE_TASK_DELAY);
+      TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
+      break;
+    }
+
+    case TASK_STATES::TRACKING_TARGET: {
+      if (TASK_DATA.TARGET_INDEX == 0) {
+        TASK_DATA.X_pos = 0;
+        TASK_DATA.Y_pos = 0;
+        TASK_DATA.currentHeading = 0;
+      }
+
+      setTargetHeading(atan2(
+        dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] - TASK_DATA.Y_pos,
+        dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] - TASK_DATA.X_pos
+        ));
+
+      break;
+    }
+
+    case TASK_STATES::ROTATE_TO_TARGET: {
+      Motor::targetRps = 0;
+      if (headingError > -HEADING_ERROR_TOLERANCE && headingError < HEADING_ERROR_TOLERANCE) {
+        TASK_DATA.taskState = TASK_STATES::TRANSLATE_TO_TARGET;
+      }
+      break;
+    }
+
+    case TASK_STATES::TRANSLATE_TO_TARGET: {
+      Motor::targetRps = SLOW_RPS;
+      x_error = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] - TASK_DATA.X_pos;
+      y_error = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] - TASK_DATA.Y_pos;
+      if (
+        (x_error > -LOCATION_ERROR_TOLERANCE && x_error < LOCATION_ERROR_TOLERANCE)
+        && 
+        (y_error > -LOCATION_ERROR_TOLERANCE && y_error < LOCATION_ERROR_TOLERANCE)) {
+          TASK_DATA.taskState = TASK_STATES::TARGET_REACHED;
+      }
+      break;
+    }
+
+    case TASK_STATES::TARGET_REACHED: {
+      // Check if all targets have been traversed
+      if (TASK_DATA.TARGET_INDEX == dataLogger.wayPointCount - 1) {
+        TASK_DATA.taskState = TASK_STATES::CHILLAXING;
+      }
+      else {
+        TASK_DATA.TARGET_INDEX++;
+        TASK_DATA.taskState = TASK_STATES::TRACKING_TARGET;
+      }
+      break;
+    }
+    
+
+    case TASK_STATES::CHILLAXING: {
+      Motor::targetRps = 0;
+      Motor::deltaRps = 0;
+      break;
+    }
   }
 
   
@@ -281,6 +359,7 @@ void loop() {
   leftMotor.correctSpeed(Motor::targetRps - Motor::deltaRps, timePassed);
   rightMotor.correctSpeed(Motor::targetRps + Motor::deltaRps, timePassed);
 
+  // Transfer data or change state if button pressed
   if (button.getSingleDebouncedPress()) {
     if (TASK_DATA.taskState == TASK_STATES::STOP) {
       TASK_DATA.taskState = TASK_STATES::WRITE_TO_SERIAL;

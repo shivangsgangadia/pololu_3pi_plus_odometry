@@ -7,7 +7,7 @@
 // #define RPS_TO_PWM_FACTOR (50 / 1.83) // This is test
 #define INTEGRAL_ERROR_THRESHOLD (255 / RPS_TO_PWM_FACTOR)
 
-#define SLOW_RPS 2.7
+#define SLOW_RPS 2.5
 #define MEDIUM_RPS 2
 #define FAST_RPS 3
 #define SUPER_FAST_RPS 4
