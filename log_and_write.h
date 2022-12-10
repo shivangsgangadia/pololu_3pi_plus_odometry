@@ -1,8 +1,9 @@
+#include "Arduino.h"
 #ifndef __LOG_WRITE_H
 #define __LOG_WRITE_H
 
-#define WAY_POINT_COUNT 50
-#define LOG_FREQUENCY 2
+#define WAY_POINT_COUNT 200
+#define LOG_FREQUENCY 10
 
 /**
 This system will enable the bot to log and write coordinates when a button is pressed
@@ -42,6 +43,7 @@ class Logger {
   Writes stored waypoints to serial and clears @variable this->wayPointCount
   */
   void writeToSerial() {
+    digitalWrite(YELLOW_PIN, HIGH);
     if (this->sentWayPointCount < this->wayPointCount) {
       for (int i = 0; i < this->wayPointCount; i++) {
         Serial.print(this->wayPoints[i][0]);
@@ -50,7 +52,9 @@ class Logger {
         this->sentWayPointCount++;
         delay(100);
       }
+      Serial.println("11111111111111111111");
     }
+    digitalWrite(YELLOW_PIN, LOW);
   }
 };
 

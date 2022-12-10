@@ -206,20 +206,21 @@ class LineSensor {
   float getDifferentialError() {
     int lineDetected = 0;
     float sum = 0;
-    for (int i = 1; i < SENSOR_COUNT - 1; i++) {
-      if (this->currentReadings[i] > READ_TIME_THRESHOLD - 1000) {
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+      uint8_t readings = getCalibratedReadings();
+      if ((readings >> i) & 0b1 == 1) {
         lineDetected++;
       }
       sum += this->currentReadings[i];
     }
     // BLACK line found
     if (lineDetected > 0) {
-      for(int i = 1; i < SENSOR_COUNT - 1; i++){
-        sensorWeights[i] = this->currentReadings[i] / sum;
+      for(int i = 0; i < SENSOR_COUNT; i++){
+        this->sensorWeights[i] = this->currentReadings[i] / sum;
       }
     }
-    float leftWeight = sensorWeights[1] + (0.5 * sensorWeights[2]);
-    float rightWeight = sensorWeights[3] + (0.5 * sensorWeights[2]);
+    float leftWeight = this->sensorWeights[0] + this->sensorWeights[1] + (0.2 * this->sensorWeights[2]);
+    float rightWeight = this->sensorWeights[4] + this->sensorWeights[3] + (0.2 * this->sensorWeights[2]);
     return (leftWeight - rightWeight);
   }
 

@@ -15,10 +15,16 @@
 
 // #define USE_IMU
 // #define DEBUG
+// #define USE_HEADING_ALGORITHM
+// #define USE_WEIGHTED_AVERAGE_ALGORITHM
+// #define USE_CARTESIAN_COORDINATES
+// #define USE_POLAR_COORDINATES
+
+
 #define PRE_TASK_DELAY 2000
 #define NO_LINE_IDLE_TIME 1000
-#define HEADING_ERROR_TOLERANCE 0.01
-#define LOCATION_ERROR_TOLERANCE 0.01
+#define HEADING_ERROR_TOLERANCE 1
+#define LOCATION_ERROR_TOLERANCE 1
 
 Motor leftMotor(LMOTOR_DIR_PIN, LMOTOR_SPEED_PIN);
 Motor rightMotor(RMOTOR_DIR_PIN, RMOTOR_SPEED_PIN);
@@ -120,7 +126,7 @@ void setup() {
 }
 
 void setTargetHeading(float targetHeading) {
-  TASK_DATA.targetHeading = targetHeading * 2;
+  TASK_DATA.targetHeading = targetHeading;
 }
 
 
@@ -134,11 +140,13 @@ float getDegreesMoved(int timePassed) {
 
 long timePassed, dataRecordTimer, idleTime;
 double speedRps, leftMotorCPR, rightMotorCPR;
-float degreesMoved, distanceMoved_x;
-float deltaRpsP = 0.13, deltaRpsD = 1.9;
+float degreesMoved, distanceMoved_x, totalDistanceMoved;
+float deltaRpsP = 0.19, deltaRpsD = 2;
 float headingError, previousHeadingError;
 uint8_t fullReadings, calibratedReadings;
 float x_error, y_error;
+bool targetReached;
+float previousTargetHeading = 0.0, alpha = 0.2;
 void loop() {
   //-----------------------------COLLECT INPUTS-----------------------------------
   // Update time passed
@@ -157,9 +165,11 @@ void loop() {
   float rightMotorRotations = rightMotorCPR / ENC_COUNTS_PER_ROTATION;
 
   // Read and update line sensor
-  DEVICES.linesensor.blockingRead();
-  fullReadings = DEVICES.linesensor.getCalibratedReadings();
-  DEVICES.linesensor.findPaths();
+  if (TASK_DATA.taskState != TASK_STATES::TRANSLATE_TO_TARGET && TASK_DATA.taskState != TASK_STATES::TRACKING_TARGET && TASK_DATA.taskState != TASK_STATES::TARGET_REACHED) {
+    DEVICES.linesensor.blockingRead();
+    fullReadings = DEVICES.linesensor.getCalibratedReadings();
+    DEVICES.linesensor.findPaths();
+  }
 
   //------------------------------UPDATE ROBOT & SENSOR STATE-------------------------------
 
@@ -185,10 +195,9 @@ void loop() {
   float leftWheelDistanceMoved = (leftMotorRotations * WHEEL_CIRCUMFERENCE);
   float rightWheelDistanceMoved = (rightMotorRotations * WHEEL_CIRCUMFERENCE);
   distanceMoved_x = (leftWheelDistanceMoved + rightWheelDistanceMoved) / 2; // TODO: make A - B and then check
+  totalDistanceMoved += distanceMoved_x;
 
-  //                      Gyro reading                    Mag reading
-  // degreesMoved = getDegreesMoved(timePassed);
-  // heading = 0;
+  
   degreesMoved = (rightWheelDistanceMoved - leftWheelDistanceMoved) * (360 / BOT_CIRCUMFERENCE);
   TASK_DATA.currentHeading += degreesMoved;
   TASK_DATA.X_pos += distanceMoved_x * cos(degreesMoved);
@@ -236,19 +245,31 @@ void loop() {
       Motor::targetRps = SLOW_RPS;
       
       TASK_DATA.taskState = TASK_STATES::NO_LINE;
-      // Line found
-      if (DEVICES.linesensor.pathCount > 0) {
-        TASK_DATA.targetHeading = TASK_DATA.currentHeading - DEVICES.linesensor.pathsAngles[0];
-        if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
-          dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
-          dataRecordTimer = 0;
-        }
+      Motor::deltaRps = 60 * DEVICES.linesensor.getDifferentialError();
+      if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
+        // dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
+        dataLogger.addWayPoint(TASK_DATA.currentHeading, totalDistanceMoved);
+        dataRecordTimer = 0;
       }
-      // No line
-      else {
+
+      if (DEVICES.linesensor.pathCount == 0) {
         idleTime = 0;
         TASK_DATA.taskState = TASK_STATES::NO_LINE;
       }
+
+      // Line found
+      // if (DEVICES.linesensor.pathCount > 0) {
+      //   TASK_DATA.targetHeading = TASK_DATA.currentHeading - DEVICES.linesensor.pathsAngles[0];
+      //   if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
+      //     dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
+      //     dataRecordTimer = 0;
+      //   }
+      // }
+      // // No line
+      // else {
+      //   idleTime = 0;
+      //   TASK_DATA.taskState = TASK_STATES::NO_LINE;
+      // }
       break;
     }
 
@@ -262,6 +283,11 @@ void loop() {
       }
       else {
         idleTime += timePassed;
+      }
+      if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
+        // dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
+        dataLogger.addWayPoint(TASK_DATA.currentHeading, totalDistanceMoved);
+        dataRecordTimer = 0;
       }
       break;
     }
@@ -277,6 +303,7 @@ void loop() {
       // You can get to this state from STOP only using button
       // Write to serial
       dataLogger.writeToSerial();
+      // delay(500);
       // Go to suspend
       TASK_DATA.taskState = TASK_STATES::PRE_TASK_SUSPEND;
       break;
@@ -292,7 +319,7 @@ void loop() {
       // You can come to this task from suspend only using button
       TASK_DATA.targetHeading = 0;
       delay(PRE_TASK_DELAY);
-      TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
+      TASK_DATA.taskState = TASK_STATES::TRACKING_TARGET;
       break;
     }
 
@@ -300,41 +327,72 @@ void loop() {
       if (TASK_DATA.TARGET_INDEX == 0) {
         TASK_DATA.X_pos = 0;
         TASK_DATA.Y_pos = 0;
+        totalDistanceMoved = 0;
         TASK_DATA.currentHeading = 0;
+
       }
+      
+      TASK_DATA.taskState = TASK_STATES::TRANSLATE_TO_TARGET;
 
-      setTargetHeading(atan2(
-        dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] - TASK_DATA.Y_pos,
-        dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] - TASK_DATA.X_pos
-        ));
-
-      break;
+      // break;
     }
 
-    case TASK_STATES::ROTATE_TO_TARGET: {
-      Motor::targetRps = 0;
-      if (headingError > -HEADING_ERROR_TOLERANCE && headingError < HEADING_ERROR_TOLERANCE) {
-        TASK_DATA.taskState = TASK_STATES::TRANSLATE_TO_TARGET;
-      }
-      break;
-    }
+    
 
     case TASK_STATES::TRANSLATE_TO_TARGET: {
       Motor::targetRps = SLOW_RPS;
-      x_error = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] - TASK_DATA.X_pos;
-      y_error = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] - TASK_DATA.Y_pos;
-      if (
-        (x_error > -LOCATION_ERROR_TOLERANCE && x_error < LOCATION_ERROR_TOLERANCE)
-        && 
-        (y_error > -LOCATION_ERROR_TOLERANCE && y_error < LOCATION_ERROR_TOLERANCE)) {
-          TASK_DATA.taskState = TASK_STATES::TARGET_REACHED;
+      // Calculate target degrees in global coordinates
+      // float targetDegrees = atan2(
+      //   dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] - TASK_DATA.Y_pos,
+      //   dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] - TASK_DATA.X_pos
+      //   ) * 180 / PI; // Radians to degrees
+      // TASK_DATA.targetHeading = ((alpha * targetDegrees) + ( (1 - alpha) * previousTargetHeading));
+      // previousTargetHeading = targetDegrees;
+
+      TASK_DATA.targetHeading = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0];
+
+      targetReached = false;
+      if (totalDistanceMoved >= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1]) {
+        targetReached = true;
+      }
+      
+      // if (
+      //   (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] >= 0 && TASK_DATA.X_pos >= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0])
+      //   ||
+      //   (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] < 0 && TASK_DATA.X_pos <= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0])
+      //   ) {
+      //   targetReached &= true;
+      // }
+      // else {
+      //   targetReached &= false;
+      // }
+
+
+      // if (
+      //     (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] >= 0 && TASK_DATA.Y_pos >= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1])
+      //     ||
+      //     (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] < 0 && TASK_DATA.Y_pos <= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1])
+      //   ) {
+
+      //   targetReached &= true;
+      // }
+      // else {
+      //   targetReached &= false;
+      // }
+      
+      if (targetReached) {
+        // TASK_DATA.X_pos = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0];
+        // TASK_DATA.Y_pos = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1];
+        TASK_DATA.taskState = TASK_STATES::TARGET_REACHED;
+        // Motor::targetRps = 0;
       }
       break;
     }
 
     case TASK_STATES::TARGET_REACHED: {
+      // blinkAndBeep(1);
       // Check if all targets have been traversed
-      if (TASK_DATA.TARGET_INDEX == dataLogger.wayPointCount - 1) {
+      if (TASK_DATA.TARGET_INDEX >= dataLogger.wayPointCount - 1) {
         TASK_DATA.taskState = TASK_STATES::CHILLAXING;
       }
       else {
@@ -410,13 +468,23 @@ void loop() {
   //   Serial.print(",");
   // }
   
-  Serial.print("X:");
-  Serial.print(TASK_DATA.X_pos);
-  Serial.print(",Y:");
-  Serial.print(TASK_DATA.Y_pos);
-  Serial.print(",theta:");
-  Serial.print(TASK_DATA.currentHeading);
-  Serial.println();
+  // Serial.print("X:");
+  // Serial.print(TASK_DATA.X_pos);
+  // Serial.print(",Y:");
+  // Serial.print(TASK_DATA.Y_pos);
+  // Serial.print(",theta:");
+  // Serial.print(TASK_DATA.currentHeading);
+  // Serial.print(",target X:");
+  // Serial.print(dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0]);
+  // Serial.print(",target Y:");
+  // Serial.print(dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1]);
+  // Serial.print(",target theta:");
+  // Serial.print(TASK_DATA.targetHeading);
+  // Serial.println();
+
+  Serial.println(DEVICES.linesensor.getDifferentialError());
+
+  // Serial.println(TASK_DATA.targetHeading);
 #endif
   
   // int extraDelay = 100 - timePassed;
