@@ -3,7 +3,7 @@
 #define __LOG_WRITE_H
 
 #define WAY_POINT_COUNT 200
-#define LOG_FREQUENCY 10
+#define LOG_FREQUENCY 1
 
 /**
 This system will enable the bot to log and write coordinates when a button is pressed

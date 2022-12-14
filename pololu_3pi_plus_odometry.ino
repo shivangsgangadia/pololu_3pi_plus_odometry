@@ -200,9 +200,6 @@ void loop() {
   
   degreesMoved = (rightWheelDistanceMoved - leftWheelDistanceMoved) * (360 / BOT_CIRCUMFERENCE);
   TASK_DATA.currentHeading += degreesMoved;
-  TASK_DATA.X_pos += distanceMoved_x * cos(degreesMoved);
-  TASK_DATA.Y_pos += distanceMoved_x * sin(degreesMoved);
-  // targetHeading -= degreesMoved;
 
   // Correct heading
   headingError = TASK_DATA.targetHeading - TASK_DATA.currentHeading;
@@ -235,9 +232,6 @@ void loop() {
         TASK_DATA.taskState = TASK_STATES::FOLLOWING_LINE;
       }
       
-      // if (TASK_DATA.X_pos >= 500) {
-      //   TASK_DATA.taskState = TASK_STATES::STOP;
-      // } 
       break;
     }
     
@@ -257,19 +251,6 @@ void loop() {
         TASK_DATA.taskState = TASK_STATES::NO_LINE;
       }
 
-      // Line found
-      // if (DEVICES.linesensor.pathCount > 0) {
-      //   TASK_DATA.targetHeading = TASK_DATA.currentHeading - DEVICES.linesensor.pathsAngles[0];
-      //   if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
-      //     dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
-      //     dataRecordTimer = 0;
-      //   }
-      // }
-      // // No line
-      // else {
-      //   idleTime = 0;
-      //   TASK_DATA.taskState = TASK_STATES::NO_LINE;
-      // }
       break;
     }
 
@@ -285,7 +266,6 @@ void loop() {
         idleTime += timePassed;
       }
       if (dataRecordTimer >= (1000 / LOG_FREQUENCY)) {
-        // dataLogger.addWayPoint(TASK_DATA.X_pos, TASK_DATA.Y_pos);
         dataLogger.addWayPoint(TASK_DATA.currentHeading, totalDistanceMoved);
         dataRecordTimer = 0;
       }
@@ -341,13 +321,6 @@ void loop() {
 
     case TASK_STATES::TRANSLATE_TO_TARGET: {
       Motor::targetRps = SLOW_RPS;
-      // Calculate target degrees in global coordinates
-      // float targetDegrees = atan2(
-      //   dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] - TASK_DATA.Y_pos,
-      //   dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] - TASK_DATA.X_pos
-      //   ) * 180 / PI; // Radians to degrees
-      // TASK_DATA.targetHeading = ((alpha * targetDegrees) + ( (1 - alpha) * previousTargetHeading));
-      // previousTargetHeading = targetDegrees;
 
       TASK_DATA.targetHeading = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0];
 
@@ -356,35 +329,8 @@ void loop() {
         targetReached = true;
       }
       
-      // if (
-      //   (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] >= 0 && TASK_DATA.X_pos >= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0])
-      //   ||
-      //   (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0] < 0 && TASK_DATA.X_pos <= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0])
-      //   ) {
-      //   targetReached &= true;
-      // }
-      // else {
-      //   targetReached &= false;
-      // }
-
-
-      // if (
-      //     (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] >= 0 && TASK_DATA.Y_pos >= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1])
-      //     ||
-      //     (dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1] < 0 && TASK_DATA.Y_pos <= dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1])
-      //   ) {
-
-      //   targetReached &= true;
-      // }
-      // else {
-      //   targetReached &= false;
-      // }
-      
       if (targetReached) {
-        // TASK_DATA.X_pos = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][0];
-        // TASK_DATA.Y_pos = dataLogger.wayPoints[TASK_DATA.TARGET_INDEX][1];
         TASK_DATA.taskState = TASK_STATES::TARGET_REACHED;
-        // Motor::targetRps = 0;
       }
       break;
     }
